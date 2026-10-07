@@ -25,7 +25,12 @@ if not args.skip_build:
     subprocess.run(["npm", "ci"], cwd=root, check=True)
     subprocess.run(["npm", "run", "tauri", "--", "android", "init", "--ci"], cwd=root, check=True)
     app = generated / "app"
-    if 'getByName("release") {\n            isMinifyEnabled = true' not in (app / "build.gradle.kts").read_text():
+    app_gradle = (app / "build.gradle.kts").read_text()
+    minified = (
+        'getByName("release") {\n            isMinifyEnabled = true' in app_gradle
+        or "optimization {\n               enable = true" in app_gradle
+    )
+    if not minified:
         raise SystemExit("Generated release must enable R8; inspect CLI template before continuing")
     # Only the rules the plugin distributes may keep its class.
     if "mediaparser" in (app / "proguard-rules.pro").read_text():
