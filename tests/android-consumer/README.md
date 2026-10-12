@@ -22,8 +22,9 @@ python3 tests/android-consumer/run.py --serial <adb-serial> --target aarch64
 `--build-only` builds and signs the APK without a device; `--skip-build` installs
 the APK from an earlier build. CI uses both to keep the build outside the emulator.
 
-The pinned npm CLI generates the Android project (ignored by Git). Its release
-variant enables R8; the runner requires its nonempty mapping file before installing.
+The pinned **@tauri-apps/cli 2.12.0** generates the Android project (ignored by Git). Its
+release variant enables R8; the runner requires its nonempty mapping file before
+installing.
 A local test-only signing key is created inside the ignored generated directory; it
 must never be used for publication. The test package is
 `com.plugin.nativejpegconsumer`. The runner installs or updates that package and

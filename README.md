@@ -61,6 +61,13 @@ for more details.
 The main plugin provides a Tauri integration layer that exposes media parsing
 functionality to Tauri applications. It uses the `media-parser` module internally.
 
+## Requirements
+
+   * **Tauri 2.12.0** (host app `tauri`, `@tauri-apps/api`, and CLI should match this
+     line).
+   * Android host apps on Tauri 2.12 should use the **2.12.0 CLI** and re-run `tauri
+      android init` so the project picks up Gradle 9, Kotlin 2.2, and `targetSdk` 37.
+
 ## Getting Started
 
 ### Installation
