@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import type { Channel } from '@tauri-apps/api/core';
+
 import { streamThumbnails, type StreamedThumbnailInfo } from './index';
 
 type RawMessage = { index: number; message: unknown };
@@ -17,16 +19,20 @@ const CHANNEL_ID = 7;
 function mockIpc(
    scheduled: Promise<null> = Promise.resolve(null),
    cancelled: Promise<null> = Promise.resolve(null),
-): { calls: Call[]; deliver(index: number, message: unknown): void } {
-   let callback: ((raw: RawMessage) => void) | undefined;
+): { calls: Call[]; callbackCount(): number; deliver(index: number, message: unknown): void } {
+   const callbacks = new Map<number, (raw: RawMessage) => void>();
+   let nextId = CHANNEL_ID;
    const calls: Call[] = [];
    (globalThis as Record<string, unknown>).window = {
       __TAURI_INTERNALS__: {
          transformCallback(fn: (raw: RawMessage) => void): number {
-            callback = fn;
-            return CHANNEL_ID;
+            const id = nextId++;
+            callbacks.set(id, fn);
+            return id;
          },
-         unregisterCallback(): void {},
+         unregisterCallback(id: number): void {
+            callbacks.delete(id);
+         },
          invoke: (cmd: string, args: Record<string, unknown>): Promise<null> => {
             calls.push({ cmd, args });
             return cmd === 'plugin:media-parser|cancel_thumbnail_stream' ? cancelled : scheduled;
@@ -35,8 +41,9 @@ function mockIpc(
    };
    return {
       calls,
+      callbackCount: () => callbacks.size,
       deliver(index, message) {
-         callback?.({ index, message });
+         callbacks.get(CHANNEL_ID)?.({ index, message });
       },
    };
 }
@@ -242,4 +249,47 @@ test('rejects on a bad message while the extraction is still running', async () 
    ipc.deliver(0, thumbnailMessage([0]));
 
    await assert.rejects(stream, /consumer failed/);
+});
+
+test('unregisters channels when invoke rejects before entering the handler', async () => {
+   const error = new Error('not allowed by ACL');
+   const ipc = mockIpc(Promise.reject(error));
+
+   for (let attempt = 0; attempt < 100; attempt += 1) {
+      await assert.rejects(streamThumbnails('/video.mp4', {
+         timestamps: [0, 500],
+         onThumbnail: () => assert.fail(),
+      }), (reason) => reason === error);
+   }
+   assert.equal(ipc.callbackCount(), 0);
+});
+
+test('releases the onThumbnail closure once the stream resolves', async () => {
+   const ipc = mockIpc();
+
+   const stream = streamThumbnails('/video.mp4', { timestamps: [0], onThumbnail: () => undefined });
+   const channel = ipc.calls[0].args.onThumbnail as Channel<unknown>;
+   const handler = channel.onmessage;
+   ipc.deliver(0, thumbnailMessage([0]));
+   ipc.deliver(1, { done: 1 });
+
+   await stream;
+   assert.notEqual(channel.onmessage, handler);
+});
+
+test('releases the onThumbnail closure once the stream rejects', async () => {
+   const ipc = mockIpc();
+
+   const stream = streamThumbnails('/video.mp4', {
+      timestamps: [0],
+      onThumbnail: () => {
+         throw new Error('consumer failed');
+      },
+   });
+   const channel = ipc.calls[0].args.onThumbnail as Channel<unknown>;
+   const handler = channel.onmessage;
+   ipc.deliver(0, thumbnailMessage([0]));
+
+   await assert.rejects(stream, /consumer failed/);
+   assert.notEqual(channel.onmessage, handler);
 });

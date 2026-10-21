@@ -198,11 +198,17 @@ export async function streamThumbnails(
       rejectDone = reject;
    });
 
+   const settle = (): void => {
+      settled = true;
+      // Tauri 2.12.0 never ends mobile channels; the leftover Channel and its Rust map
+      // entry are Tauri's, but a no-op handler keeps them from also pinning this closure.
+      channel.onmessage = () => undefined;
+   };
    const fail = (reason: unknown): void => {
       if (settled) {
          return;
       }
-      settled = true;
+      settle();
       rejectDone(reason);
       // Not awaited, and its own failure is moot: the stream has already failed.
       invoke('plugin:media-parser|cancel_thumbnail_stream', { channelId: channel.id })
@@ -218,7 +224,7 @@ export async function streamThumbnails(
          fail(new TypeError('Thumbnail stream did not answer every timestamp exactly once.'));
          return;
       }
-      settled = true;
+      settle();
       resolveDone();
    };
 
@@ -251,7 +257,12 @@ export async function streamThumbnails(
       maxHeight: options.maxHeight,
       headers: options.headers,
       onThumbnail: channel,
-   }).catch(fail);
+   }).catch((error: unknown) => {
+      // shortcut: pre-handler failures have no channel end in Tauri 2.12.0; recheck on upgrade.
+      // @ts-expect-error Tauri exposes cleanupCallback at runtime but declares it private.
+      channel.cleanupCallback();
+      fail(error);
+   });
    return done;
 }
 
