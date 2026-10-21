@@ -57,6 +57,10 @@ pub enum MediaParserError {
    #[error("Content length not available")]
    ContentLengthUnavailable,
 
+   /// The caller asked a streaming extraction to stop
+   #[error("Operation cancelled")]
+   Cancelled,
+
    /// Other error (fallback for cases not covered above)
    #[error("Other error: {0}")]
    Other(String),
@@ -78,6 +82,7 @@ mod tests {
       MediaParserError::OutputLimit("thumbnail payload is too large".to_string()),
       "Output limit exceeded: thumbnail payload is too large"
    )]
+   #[case::cancellation_without_a_reason(MediaParserError::Cancelled, "Operation cancelled")]
    #[case::resource_limit_separately_from_output_limit(
       MediaParserError::ResourceLimit("allocation failed".to_string()),
       "Resource limit reached: allocation failed"
