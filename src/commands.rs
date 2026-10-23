@@ -749,13 +749,25 @@ mod tests {
    }
 
    /// Starts `stream_thumbnails` from a mock webview and collects the
-   /// `indices` of each thumbnail until the JSON terminal arrives.
+   /// `indices` of each thumbnail until every handle to the channel is gone.
+   ///
+   /// With `cancel_on_first_thumbnail` the channel handler calls the
+   /// `cancel_thumbnail_stream` command as soon as the first thumbnail
+   /// arrives. The handler runs on the decoding thread, so the stop flag is
+   /// set before the next frame is delivered. The test keeps no `Channel`
+   /// handle of its own: the channel is only dropped once the task and the
+   /// blocking decode, which holds a clone, are both finished, so the end of
+   /// the messages proves the decode worker stopped.
+   ///
+   /// Returns the thumbnails and the JSON terminal, if one was sent.
    #[cfg(native_h264_backend)]
    fn stream_from_mock_webview(
       source: String,
       timestamps: Vec<u64>,
-   ) -> (Vec<Vec<usize>>, serde_json::Value) {
-      use std::sync::mpsc;
+      accurate: bool,
+      cancel_on_first_thumbnail: bool,
+   ) -> (Vec<Vec<usize>>, Option<serde_json::Value>) {
+      use std::sync::{OnceLock, mpsc};
       use tauri::{
          Manager,
          test::{mock_builder, mock_context, noop_assets},
@@ -768,17 +780,29 @@ mod tests {
          .build()
          .expect("mock webview");
       let (messages, received) = mpsc::channel();
+      let channel_id = Arc::new(OnceLock::new());
+      let canceller = (app.handle().clone(), window.as_ref().clone());
+      let id_for_handler = Arc::clone(&channel_id);
       let channel = Channel::new(move |body| {
+         let is_thumbnail = matches!(body, InvokeResponseBody::Raw(_));
          messages.send(body).unwrap();
+         if cancel_on_first_thumbnail && is_thumbnail {
+            let (handle, webview) = &canceller;
+            let id = *id_for_handler
+               .get()
+               .expect("the id is set before streaming");
+            cancel_thumbnail_stream(webview.clone(), id, handle.state());
+         }
          Ok(())
       });
+      channel_id.set(channel.id()).expect("the id is set once");
 
       stream_thumbnails(
          window.as_ref().clone(),
          source,
          timestamps,
          None,
-         Some(true),
+         Some(accurate),
          None,
          None,
          None,
@@ -790,11 +814,15 @@ mod tests {
       .expect("the request is valid");
 
       let mut thumbnails = Vec::new();
+      let mut terminal = None;
       loop {
-         match received
-            .recv_timeout(Duration::from_secs(30))
-            .expect("the stream should end with a terminal message")
-         {
+         let body = match received.recv_timeout(Duration::from_secs(30)) {
+            Ok(body) => body,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return (thumbnails, terminal),
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!("the stream never finished"),
+         };
+         assert!(terminal.is_none(), "a message followed the terminal");
+         match body {
             InvokeResponseBody::Raw(envelope) => {
                let header_len = u32::from_le_bytes(envelope[..4].try_into().unwrap()) as usize;
                let header: serde_json::Value =
@@ -804,30 +832,52 @@ mod tests {
                      .expect("entry should carry indices"),
                );
             }
-            InvokeResponseBody::Json(terminal) => {
-               return (thumbnails, serde_json::from_str(&terminal).unwrap());
+            InvokeResponseBody::Json(json) => {
+               terminal = Some(serde_json::from_str(&json).unwrap());
             }
          }
       }
    }
 
+   #[cfg(native_h264_backend)]
+   #[rstest]
+   #[case::exact_fans_out_shared_positions(true, vec![vec![0, 2], vec![1]])]
+   // 200 ms falls back to the keyframe at 0, so all three positions share it.
+   #[case::keyframe_mode_sends_one_thumbnail_per_keyframe(false, vec![vec![0, 1, 2]])]
+   fn stream_thumbnails_groups_positions_and_ends_with_the_count(
+      #[case] accurate: bool,
+      #[case] expected: Vec<Vec<usize>>,
+   ) {
+      let (thumbnails, terminal) =
+         stream_from_mock_webview(video_fixture_source(), vec![0, 200, 0], accurate, false);
+
+      assert_eq!(thumbnails, expected);
+      assert_eq!(
+         terminal,
+         Some(serde_json::json!({ "done": expected.len() }))
+      );
+   }
+
    #[test]
    #[cfg(native_h264_backend)]
-   fn stream_thumbnails_fans_out_positions_and_ends_with_the_count() {
+   fn cancel_thumbnail_stream_stops_a_running_stream_without_a_terminal() {
+      // Accurate mode decodes [0, 2] and then [1]; cancelling on the first
+      // must keep the second from being sent.
       let (thumbnails, terminal) =
-         stream_from_mock_webview(video_fixture_source(), vec![0, 200, 0]);
+         stream_from_mock_webview(video_fixture_source(), vec![0, 200, 0], true, true);
 
-      assert_eq!(thumbnails, vec![vec![0, 2], vec![1]]);
-      assert_eq!(terminal, serde_json::json!({ "done": 2 }));
+      assert_eq!(thumbnails, vec![vec![0, 2]]);
+      assert_eq!(terminal, None);
    }
 
    #[test]
    #[cfg(native_h264_backend)]
    fn stream_thumbnails_ends_with_the_error_a_rejected_invoke_would_carry() {
       let (thumbnails, terminal) =
-         stream_from_mock_webview("/file/that/does/not/exist.mp4".into(), vec![0]);
+         stream_from_mock_webview("/file/that/does/not/exist.mp4".into(), vec![0], true, false);
 
       assert!(thumbnails.is_empty());
+      let terminal = terminal.expect("the stream ends with a terminal");
       let message = terminal["error"]
          .as_str()
          .expect("the terminal carries an error");

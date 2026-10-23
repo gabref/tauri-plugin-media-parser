@@ -52,7 +52,7 @@ function cancels(calls: Call[]): Call[] {
    return calls.filter(({ cmd }) => cmd === 'plugin:media-parser|cancel_thumbnail_stream');
 }
 
-function thumbnailMessage(indices: number[]): ArrayBuffer {
+function thumbnailMessage(indices: unknown, entryCount = 1): ArrayBuffer {
    const entry = {
       trackId: 1,
       width: 2,
@@ -64,7 +64,7 @@ function thumbnailMessage(indices: number[]): ArrayBuffer {
       length: 1,
       indices,
    };
-   const header = new TextEncoder().encode(JSON.stringify({ version: 1, entries: [entry] }));
+   const header = new TextEncoder().encode(JSON.stringify({ version: 1, entries: Array(entryCount).fill(entry) }));
    const message = new Uint8Array(4 + header.length + 1);
    new DataView(message.buffer).setUint32(0, header.length, true);
    message.set(header, 4);
@@ -186,6 +186,35 @@ test('rejects a position answered twice', async () => {
    await assert.rejects(stream, /invalid index: 0/);
 });
 
+const MALFORMED_ENTRIES: { name: string; message: ArrayBuffer; error: RegExp }[] = [
+   { name: 'no entries', message: thumbnailMessage([0], 0), error: /one entry with indices/ },
+   { name: 'two entries', message: thumbnailMessage([0], 2), error: /one entry with indices/ },
+   { name: 'empty indices', message: thumbnailMessage([]), error: /one entry with indices/ },
+   { name: 'indices that are not an array', message: thumbnailMessage(0), error: /one entry with indices/ },
+   { name: 'a negative index', message: thumbnailMessage([-1]), error: /invalid index: -1/ },
+   { name: 'a fractional index', message: thumbnailMessage([0.5]), error: /invalid index: 0\.5/ },
+   { name: 'a string index', message: thumbnailMessage(['0']), error: /invalid index: 0\.$/ },
+   { name: 'a null index', message: thumbnailMessage([null]), error: /invalid index: null/ },
+   { name: 'an index past the last position', message: thumbnailMessage([2]), error: /invalid index: 2/ },
+   { name: 'a duplicate index in one message', message: thumbnailMessage([0, 0]), error: /invalid index: 0\.$/ },
+];
+
+for (const { name, message, error } of MALFORMED_ENTRIES) {
+   test(`rejects a thumbnail message with ${name}`, async () => {
+      const ipc = mockIpc();
+
+      const stream = streamThumbnails('/video.mp4', {
+         timestamps: [0, 500],
+         onThumbnail: () => {
+            assert.fail('a malformed message must not reach the callback');
+         },
+      });
+      ipc.deliver(0, message);
+
+      await assert.rejects(stream, error);
+   });
+}
+
 test('rejects when a position is never answered', async () => {
    const ipc = mockIpc();
 
@@ -254,16 +283,22 @@ test('rejects with the backend error when invoke rejects', async () => {
 
 test('rejects on a bad message while the extraction is still running', async () => {
    const ipc = mockIpc();
+   let calls = 0;
 
    const stream = streamThumbnails('/video.mp4', {
       timestamps: [0, 500],
       onThumbnail: () => {
-         throw new Error('consumer failed');
+         calls += 1;
       },
    });
    ipc.deliver(0, thumbnailMessage([0]));
+   ipc.deliver(1, {});
 
-   await assert.rejects(stream, /consumer failed/);
+   await assert.rejects(stream, TypeError);
+   assert.equal(calls, 1);
+   assert.deepEqual(cancels(ipc.calls), [
+      { cmd: 'plugin:media-parser|cancel_thumbnail_stream', args: { channelId: CHANNEL_ID } },
+   ]);
 });
 
 test('unregisters channels when invoke rejects before entering the handler', async () => {
