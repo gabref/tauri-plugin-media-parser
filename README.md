@@ -369,6 +369,27 @@ IPC buffer. Retaining one thumbnail retains the complete response. Copy a view
 with `new Uint8Array(thumbnail.data)` when it must outlive the rest of the
 batch.
 
+`streamThumbnails` takes the same options plus `onThumbnail`. It sends each
+thumbnail to `onThumbnail` when its GOP is decoded:
+
+```typescript
+import { streamThumbnails } from '@silvermine/tauri-plugin-media-parser';
+
+await streamThumbnails('/path/to/video.mp4', {
+   timestamps: [0, 5_000, 10_000],
+   onThumbnail(thumbnail) {
+      // `indices` are the positions in `timestamps` that this thumbnail answers.
+      console.log(thumbnail.indices, thumbnail.timestampSec);
+   },
+});
+```
+
+Thumbnails arrive in file order. `onThumbnail` must be synchronous and must
+return nothing, so use a block body. The promise resolves after the stream ends
+and each timestamp has a thumbnail. It rejects if the backend fails, a message
+is malformed, or `onThumbnail` throws. Thumbnails that arrived before a
+rejection stay valid. The 256 MiB cap applies to the full stream.
+
 The plugin caches up to eight parsed thumbnail sessions. Remote sessions expire
 five minutes after they are built, and local sessions after one minute without
 reuse; concurrent requests for the same cold source share one index build.
