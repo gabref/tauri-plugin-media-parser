@@ -134,6 +134,11 @@ Add the plugin permission to your capabilities file
 }
 ```
 
+`media-parser:default` allows every command. If you grant individual permissions
+instead, `streamThumbnails` needs both `media-parser:allow-stream-thumbnails` and
+`media-parser:allow-cancel-thumbnail-stream`. Without the second, a stream that
+fails in JavaScript cannot stop its native extraction.
+
 Initialize the plugin in your Tauri app:
 
 ```rust
@@ -363,6 +368,27 @@ All `data` fields returned by one call are subarray views into a shared binary
 IPC buffer. Retaining one thumbnail retains the complete response. Copy a view
 with `new Uint8Array(thumbnail.data)` when it must outlive the rest of the
 batch.
+
+`streamThumbnails` takes the same options plus `onThumbnail`. It sends each
+thumbnail to `onThumbnail` when its GOP is decoded:
+
+```typescript
+import { streamThumbnails } from '@silvermine/tauri-plugin-media-parser';
+
+await streamThumbnails('/path/to/video.mp4', {
+   timestamps: [0, 5_000, 10_000],
+   onThumbnail(thumbnail) {
+      // `indices` are the positions in `timestamps` that this thumbnail answers.
+      console.log(thumbnail.indices, thumbnail.timestampSec);
+   },
+});
+```
+
+Thumbnails arrive in file order. `onThumbnail` must be synchronous and must
+return nothing, so use a block body. The promise resolves after the stream ends
+and each timestamp has a thumbnail. It rejects if the backend fails, a message
+is malformed, or `onThumbnail` throws. Thumbnails that arrived before a
+rejection stay valid. The 256 MiB cap applies to the full stream.
 
 The plugin caches up to eight parsed thumbnail sessions. Remote sessions expire
 five minutes after they are built, and local sessions after one minute without

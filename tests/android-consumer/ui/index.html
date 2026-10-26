@@ -1,8 +1,10 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>Native JPEG validation</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<p><a href="manual.html" style="font:20px sans-serif;padding:16px;display:inline-block">Open manual streaming test →</a></p>
 <pre id="result">Running native JPEG consumer tests…</pre>
-<script>
+<script type="module">
 const invoke = window.__TAURI__.core.invoke;
 async function checkThumbnail(source) {
   const response = await invoke('plugin:media-parser|get_thumbnails', {
@@ -29,11 +31,49 @@ async function checkThumbnail(source) {
   bitmap.close();
   return jpeg.length;
 }
+async function checkStream(streamThumbnails, source) {
+  const timestamps = [0, 200, 0];
+  const answered = new Set();
+  const jpegs = [];
+  await streamThumbnails(source, {
+    timestamps, accurate: true, maxWidth: 320, maxHeight: 180,
+    onThumbnail(thumbnail) {
+      const jpeg = thumbnail.data;
+      if (thumbnail.width !== 320 || thumbnail.height !== 180) {
+        throw new Error('invalid stream dimensions');
+      }
+      if (jpeg[0] !== 255 || jpeg[1] !== 216 || jpeg[jpeg.length - 2] !== 255 || jpeg[jpeg.length - 1] !== 217) {
+        throw new Error('invalid stream JPEG');
+      }
+      for (const index of thumbnail.indices) {
+        answered.add(index);
+      }
+      // `data` is a view into the IPC buffer, so copy it into the Blob.
+      jpegs.push(new Blob([jpeg.slice()], {type: 'image/jpeg'}));
+    }
+  });
+  if (jpegs.length !== 2 || answered.size !== timestamps.length || [0, 1, 2].some((index) => !answered.has(index))) {
+    throw new Error('stream sent ' + jpegs.length + ' messages, answered ' + [...answered]);
+  }
+  for (const jpeg of jpegs) {
+    const bitmap = await createImageBitmap(jpeg);
+    try {
+      if (bitmap.width !== 320 || bitmap.height !== 180) {
+        throw new Error('undecodable stream dimensions');
+      }
+    } finally {
+      bitmap.close();
+    }
+  }
+  return 'stream=' + jpegs.length;
+}
 (async () => {
   try {
     const source = await invoke('fixture_path');
     const sizes = [await checkThumbnail(source), ...await Promise.all([checkThumbnail(source), checkThumbnail(source)])];
-    const result = 'PASS native JPEG consumer sequential+concurrent bytes=' + sizes.join(',');
+    const { streamThumbnails } = await import('./manual-api.js');
+    const stream = await checkStream(streamThumbnails, source);
+    const result = 'PASS native JPEG consumer sequential+concurrent bytes=' + sizes.join(',') + ' ' + stream;
     document.querySelector('#result').textContent = result;
     await invoke('report_result', { result });
   } catch (error) {
